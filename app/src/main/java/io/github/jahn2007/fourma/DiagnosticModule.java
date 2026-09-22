@@ -1,6 +1,7 @@
 package io.github.jahn2007.fourma;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Dialog;
 import android.app.Instrumentation;
 import android.content.Intent;
@@ -24,6 +25,7 @@ import android.widget.TextView;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.ref.WeakReference;
 import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -91,6 +93,7 @@ public class DiagnosticModule extends XposedModule {
     private String processName = "unknown";
     private Context targetContext;
     private ClassLoader targetClassLoader;
+    private WeakReference<Activity> currentActivity = new WeakReference<>(null);
     private volatile boolean targetAppActive;
     private volatile boolean hotReloadRecordPending;
     private volatile boolean nativeDiscoveryStarted;
@@ -137,6 +140,7 @@ public class DiagnosticModule extends XposedModule {
             pendingReports.clear();
         }
         targetContext = null;
+        currentActivity = new WeakReference<>(null);
         targetAppActive = false;
         nativeDiscoveryStarted = false;
         inspectedPageViews.clear();
@@ -431,6 +435,7 @@ public class DiagnosticModule extends XposedModule {
 
     private void inspectActivitySoon(Activity activity) {
         targetContext = activity.getApplicationContext();
+        currentActivity = new WeakReference<>(activity);
         tryRecordPendingHotReload();
         flushPendingReports();
         report("activity", activity.getClass().getName());
@@ -512,6 +517,24 @@ public class DiagnosticModule extends XposedModule {
         reportAlways("dispatcher_discovery", "classes=" + classNames.size()
                 + " inspected=" + inspectedClasses + " candidates=" + candidateMethods
                 + " installed=" + installedHooks);
+        showNativeDiscoveryComplete(candidateMethods, installedHooks);
+    }
+
+    private void showNativeDiscoveryComplete(int candidates, int installed) {
+        mainHandler.post(() -> {
+            Activity activity = currentActivity.get();
+            if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+            try {
+                new AlertDialog.Builder(activity)
+                        .setTitle("4MA")
+                        .setMessage("底层动态 Hook 加载完成\n候选方法：" + candidates
+                                + "\n已安装 Hook：" + installed)
+                        .setPositiveButton("知道了", null)
+                        .show();
+            } catch (Throwable error) {
+                report("dispatcher_dialog_error", error.getClass().getSimpleName());
+            }
+        });
     }
 
     private Set<String> enumerateAppBrandClasses(ClassLoader loader) {
