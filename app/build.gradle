@@ -1,0 +1,60 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.github.jahn2007.fourma'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'io.github.jahn2007.fourma'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    def signingStore = System.getenv('SIGNING_STORE_FILE')
+    def signingStorePassword = System.getenv('SIGNING_STORE_PASSWORD')
+    def signingKeyAlias = System.getenv('SIGNING_KEY_ALIAS')
+    def signingKeyPassword = System.getenv('SIGNING_KEY_PASSWORD')
+    def hasReleaseSigning = signingStore && signingStorePassword
+            && signingKeyAlias && signingKeyPassword
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(signingStore)
+                storePassword signingStorePassword
+                keyAlias signingKeyAlias
+                keyPassword signingKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            // CI can inject a persistent release key. The debug fallback keeps a first test
+            // release installable before repository secrets are configured.
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        resources {
+            merges += 'META-INF/xposed/*'
+        }
+    }
+}
+
+dependencies {
+    compileOnly 'io.github.libxposed:api:102.0.0'
+    implementation 'io.github.libxposed:service:102.0.0'
+}
