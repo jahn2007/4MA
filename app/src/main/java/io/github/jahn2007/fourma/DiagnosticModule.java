@@ -33,6 +33,9 @@ import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedInterface;
 
@@ -301,6 +304,12 @@ public class DiagnosticModule extends XposedModule {
             mainHandler.postDelayed(() -> {
                 if (captureEnabled()) scanViews(root);
             }, 4_000L);
+            long[] focusedDelays = {10_000L, 20_000L, 40_000L, 70_000L};
+            for (long delay : focusedDelays) {
+                mainHandler.postDelayed(() -> {
+                    if (captureEnabled() && targetAppActive) scanViews(root);
+                }, delay);
+            }
         }
     }
 
@@ -570,6 +579,7 @@ public class DiagnosticModule extends XposedModule {
             evaluate.setAccessible(true);
             ValueCallback<String> callback = this::handleXWebProbeResult;
             evaluate.invoke(webView, XWEB_PROBE_SCRIPT, callback);
+            installAndDrainBridgeTrace(webView, evaluate);
             syncEnhancements(webView, evaluate);
             report("xweb_probe", "submitted class=" + webView.getClass().getName());
         } catch (Throwable error) {
@@ -647,6 +657,75 @@ public class DiagnosticModule extends XposedModule {
         } catch (Throwable error) {
             report("enhancement_error", error.getClass().getSimpleName());
         }
+    }
+
+    private void installAndDrainBridgeTrace(View webView, Method evaluate) {
+        try {
+            ValueCallback<String> callback = this::handleBridgeTraceResult;
+            evaluate.invoke(webView, BridgeTraceScript.SOURCE, callback);
+        } catch (Throwable error) {
+            report("bridge_trace_error", error.getClass().getSimpleName());
+        }
+    }
+
+    private void handleBridgeTraceResult(String raw) {
+        if (raw == null) return;
+        String value = raw.replace("\\u002F", "/").replace("\\/", "/");
+        int prefix = value.indexOf("4MA_TRACE|");
+        if (prefix < 0) return;
+        String[] parts = value.substring(prefix).split("\\|", 3);
+        if (parts.length >= 2) {
+            String installed = parts[1];
+            if (installed.isEmpty()) {
+                report("bridge_trace", "installed=none");
+            } else if (installed.matches("[0-9A-Za-z_.,]+")) {
+                report("bridge_trace", "installed=" + installed);
+            }
+        }
+        if (parts.length < 3) return;
+        try {
+            String encoded = parts[2].replace("\\\"", "").replace("\"", "");
+            JSONArray events = new JSONArray(Uri.decode(encoded));
+            for (int i = 0; i < events.length(); i++) {
+                JSONObject event = events.optJSONObject(i);
+                if (event == null) continue;
+                String kind = safeTraceToken(event.optString("kind"), 32);
+                String name = safeTraceToken(event.optString("name"), 120);
+                String path = safeTracePath(event.optString("path"));
+                String keys = safeTraceKeys(event.optJSONArray("keys"));
+                String dataKeys = safeTraceKeys(event.optJSONArray("dataKeys"));
+                report("bridge_call", "kind=" + kind + " name=" + name
+                        + (path.isEmpty() ? "" : " path=" + path)
+                        + (keys.isEmpty() ? "" : " keys=" + keys)
+                        + (dataKeys.isEmpty() ? "" : " dataKeys=" + dataKeys));
+            }
+        } catch (Throwable error) {
+            report("bridge_trace_error", "parse_" + error.getClass().getSimpleName());
+        }
+    }
+
+    private String safeTraceToken(String value, int max) {
+        if (value == null) return "";
+        String safe = value.replaceAll("[^0-9A-Za-z_.$:/-]", "");
+        return clean(safe, max);
+    }
+
+    private String safeTracePath(String value) {
+        if (value == null || value.length() > 260 || value.indexOf('?') >= 0) return "";
+        if (!value.matches("[0-9A-Za-z_./:-]*")) return "";
+        return value;
+    }
+
+    private String safeTraceKeys(JSONArray values) {
+        if (values == null) return "";
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < Math.min(values.length(), 30); i++) {
+            String key = safeTraceToken(values.optString(i), 64);
+            if (key.isEmpty() || containsSensitiveName(key.toLowerCase(Locale.ROOT))) continue;
+            if (out.length() > 0) out.append(',');
+            out.append(key);
+        }
+        return out.toString();
     }
 
     private int intPref(String key, int fallback, int min, int max) {
