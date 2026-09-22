@@ -15,11 +15,13 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CompoundButton;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.text.InputType;
 
 import java.text.DateFormat;
 import java.util.Date;
@@ -33,8 +35,16 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
     private SharedPreferences reportPrefs;
     private Switch captureSwitch;
     private Switch verboseSwitch;
+    private Switch enhancementsSwitch;
+    private Switch autoDismissSwitch;
     private Switch hideIconSwitch;
     private TextView statusView;
+    private EditText guardSecondsInput;
+    private EditText rerentSecondsInput;
+    private EditText actionCooldownInput;
+    private EditText stepDelayInput;
+    private EditText flowTimeoutInput;
+    private EditText promptCooldownInput;
     private boolean binding;
 
     @Override
@@ -56,14 +66,14 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         TextView title = text("4MA", 28, Typeface.BOLD);
         root.addView(title);
 
-        TextView subtitle = text("7MA 小程序只读诊断模块 · v" + versionName(), 13, Typeface.NORMAL);
+        TextView subtitle = text("7MA 小程序体验增强模块 · v" + versionName(), 13, Typeface.NORMAL);
         subtitle.setTextColor(secondaryColor());
         subtitle.setPadding(0, dp(4), 0, dp(18));
         root.addView(subtitle);
 
         TextView notice = text(
-                "当前版本只采集经过白名单过滤的运行信息，不执行借车、锁车或还车，"
-                        + "不记录 Token、Cookie、请求头、手机号或完整网络正文。",
+                "增强功能通过 7MA 页面操作执行，并设置冷却与失败停止。模块不记录 Token、"
+                        + "Cookie、请求头、手机号或完整网络正文。",
                 15, Typeface.NORMAL);
         notice.setPadding(dp(14), dp(14), dp(14), dp(14));
         notice.setBackgroundColor(cardColor());
@@ -71,7 +81,22 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
 
         captureSwitch = addSwitch(root, "启用诊断采集", "默认开启；修改后重启微信生效");
         verboseSwitch = addSwitch(root, "记录视图类名", "增加报告信息量，仍不记录普通文本内容");
+        enhancementsSwitch = addSwitch(root, "启用 4MA 控制面板", "在 7MA 页面显示守护、还车重借和一键借车入口");
+        autoDismissSwitch = addSwitch(root, "自动继续用车", "出现跨运营区提示时自动点击“继续用车”");
         hideIconSwitch = addSwitch(root, "隐藏桌面图标", "隐藏后从 LSPosed 模块详情中的“模块设置”进入");
+
+        TextView timingTitle = text("时间参数", 18, Typeface.BOLD);
+        timingTitle.setPadding(0, dp(8), 0, dp(8));
+        root.addView(timingTitle);
+        guardSecondsInput = addNumberField(root, "临时锁车自动开锁", "单位：秒；正式建议 250", 250);
+        rerentSecondsInput = addNumberField(root, "自动还车重借", "单位：秒；正式建议 1110（18分30秒）", 1110);
+        actionCooldownInput = addNumberField(root, "两次真实操作最短间隔", "单位：毫秒；正式建议 2500", 2500);
+        stepDelayInput = addNumberField(root, "流程步骤等待", "单位：毫秒；正式建议 2800", 2800);
+        flowTimeoutInput = addNumberField(root, "流程步骤超时", "单位：毫秒；正式建议 6000", 6000);
+        promptCooldownInput = addNumberField(root, "继续用车弹窗冷却", "单位：秒；正式建议 30", 30);
+        Button saveTimings = button("保存时间参数");
+        saveTimings.setOnClickListener(v -> saveTimingValues());
+        root.addView(saveTimings, matchWrap(dp(12)));
 
         statusView = text("正在连接 LSPosed 服务…", 13, Typeface.NORMAL);
         statusView.setTypeface(Typeface.MONOSPACE);
@@ -118,6 +143,26 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
             remotePrefs.edit().putBoolean(Prefs.KEY_DEBUG_VERBOSE, checked).apply();
         });
 
+        enhancementsSwitch.setOnCheckedChangeListener((button, checked) -> {
+            if (binding) return;
+            if (remotePrefs == null) {
+                button.setChecked(!checked);
+                toast("尚未连接 LSPosed 服务");
+                return;
+            }
+            remotePrefs.edit().putBoolean(Prefs.KEY_ENHANCEMENTS_ENABLED, checked).apply();
+        });
+
+        autoDismissSwitch.setOnCheckedChangeListener((button, checked) -> {
+            if (binding) return;
+            if (remotePrefs == null) {
+                button.setChecked(!checked);
+                toast("尚未连接 LSPosed 服务");
+                return;
+            }
+            remotePrefs.edit().putBoolean(Prefs.KEY_AUTO_DISMISS_PROMPT, checked).apply();
+        });
+
         hideIconSwitch.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton buttonView, boolean checked) {
@@ -150,6 +195,20 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         binding = true;
         captureSwitch.setChecked(remotePrefs.getBoolean(Prefs.KEY_CAPTURE_ENABLED, true));
         verboseSwitch.setChecked(remotePrefs.getBoolean(Prefs.KEY_DEBUG_VERBOSE, false));
+        enhancementsSwitch.setChecked(remotePrefs.getBoolean(Prefs.KEY_ENHANCEMENTS_ENABLED, true));
+        autoDismissSwitch.setChecked(remotePrefs.getBoolean(Prefs.KEY_AUTO_DISMISS_PROMPT, true));
+        guardSecondsInput.setText(String.valueOf(remotePrefs.getInt(
+                Prefs.KEY_GUARD_UNLOCK_SECONDS, Prefs.DEFAULT_GUARD_UNLOCK_SECONDS)));
+        rerentSecondsInput.setText(String.valueOf(remotePrefs.getInt(
+                Prefs.KEY_RERENT_SECONDS, Prefs.DEFAULT_RERENT_SECONDS)));
+        actionCooldownInput.setText(String.valueOf(remotePrefs.getInt(
+                Prefs.KEY_ACTION_COOLDOWN_MS, Prefs.DEFAULT_ACTION_COOLDOWN_MS)));
+        stepDelayInput.setText(String.valueOf(remotePrefs.getInt(
+                Prefs.KEY_FLOW_STEP_DELAY_MS, Prefs.DEFAULT_FLOW_STEP_DELAY_MS)));
+        flowTimeoutInput.setText(String.valueOf(remotePrefs.getInt(
+                Prefs.KEY_FLOW_TIMEOUT_MS, Prefs.DEFAULT_FLOW_TIMEOUT_MS)));
+        promptCooldownInput.setText(String.valueOf(remotePrefs.getInt(
+                Prefs.KEY_PROMPT_COOLDOWN_SECONDS, Prefs.DEFAULT_PROMPT_COOLDOWN_SECONDS)));
         hideIconSwitch.setChecked(!isLauncherVisible());
         binding = false;
         refreshStatus();
@@ -305,6 +364,63 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         row.addView(hint);
         root.addView(row, matchWrap(dp(10)));
         return item;
+    }
+
+    private EditText addNumberField(LinearLayout root, String title, String summary, int hint) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(14), dp(10), dp(14), dp(10));
+        row.setBackgroundColor(cardColor());
+        TextView label = text(title, 15, Typeface.BOLD);
+        row.addView(label);
+        TextView help = text(summary, 12, Typeface.NORMAL);
+        help.setTextColor(secondaryColor());
+        row.addView(help);
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setHint(String.valueOf(hint));
+        input.setTextColor(primaryColor());
+        input.setSingleLine(true);
+        row.addView(input, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(row, matchWrap(dp(8)));
+        return input;
+    }
+
+    private void saveTimingValues() {
+        if (remotePrefs == null) {
+            toast("尚未连接 LSPosed 服务");
+            return;
+        }
+        Integer guard = parseRange(guardSecondsInput, 5, 3600);
+        Integer rerent = parseRange(rerentSecondsInput, 10, 7200);
+        Integer cooldown = parseRange(actionCooldownInput, 500, 30000);
+        Integer step = parseRange(stepDelayInput, 500, 30000);
+        Integer timeout = parseRange(flowTimeoutInput, 1000, 60000);
+        Integer prompt = parseRange(promptCooldownInput, 1, 600);
+        if (guard == null || rerent == null || cooldown == null || step == null
+                || timeout == null || prompt == null) {
+            toast("时间参数超出允许范围");
+            return;
+        }
+        remotePrefs.edit()
+                .putInt(Prefs.KEY_GUARD_UNLOCK_SECONDS, guard)
+                .putInt(Prefs.KEY_RERENT_SECONDS, rerent)
+                .putInt(Prefs.KEY_ACTION_COOLDOWN_MS, cooldown)
+                .putInt(Prefs.KEY_FLOW_STEP_DELAY_MS, step)
+                .putInt(Prefs.KEY_FLOW_TIMEOUT_MS, timeout)
+                .putInt(Prefs.KEY_PROMPT_COOLDOWN_SECONDS, prompt)
+                .apply();
+        toast("时间参数已保存，返回微信后生效");
+    }
+
+    private Integer parseRange(EditText input, int min, int max) {
+        try {
+            int value = Integer.parseInt(input.getText().toString().trim());
+            return value >= min && value <= max ? value : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private Button button(String label) {

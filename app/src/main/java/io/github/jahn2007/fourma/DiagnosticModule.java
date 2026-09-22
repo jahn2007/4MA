@@ -570,6 +570,7 @@ public class DiagnosticModule extends XposedModule {
             evaluate.setAccessible(true);
             ValueCallback<String> callback = this::handleXWebProbeResult;
             evaluate.invoke(webView, XWEB_PROBE_SCRIPT, callback);
+            syncEnhancements(webView, evaluate);
             report("xweb_probe", "submitted class=" + webView.getClass().getName());
         } catch (Throwable error) {
             report("xweb_probe_error", error.getClass().getSimpleName());
@@ -596,6 +597,62 @@ public class DiagnosticModule extends XposedModule {
             }
         }
         return null;
+    }
+
+    private void syncEnhancements(View webView, Method evaluate) {
+        boolean enabled = prefs != null
+                && prefs.getBoolean(Prefs.KEY_ENHANCEMENTS_ENABLED, true);
+        boolean autoDismiss = prefs != null
+                && prefs.getBoolean(Prefs.KEY_AUTO_DISMISS_PROMPT, true);
+        int guardSeconds = intPref(Prefs.KEY_GUARD_UNLOCK_SECONDS,
+                Prefs.DEFAULT_GUARD_UNLOCK_SECONDS, 5, 3600);
+        int rerentSeconds = intPref(Prefs.KEY_RERENT_SECONDS,
+                Prefs.DEFAULT_RERENT_SECONDS, 10, 7200);
+        int actionCooldown = intPref(Prefs.KEY_ACTION_COOLDOWN_MS,
+                Prefs.DEFAULT_ACTION_COOLDOWN_MS, 500, 30000);
+        int stepDelay = intPref(Prefs.KEY_FLOW_STEP_DELAY_MS,
+                Prefs.DEFAULT_FLOW_STEP_DELAY_MS, 500, 30000);
+        int flowTimeout = intPref(Prefs.KEY_FLOW_TIMEOUT_MS,
+                Prefs.DEFAULT_FLOW_TIMEOUT_MS, 1000, 60000);
+        int promptSeconds = intPref(Prefs.KEY_PROMPT_COOLDOWN_SECONDS,
+                Prefs.DEFAULT_PROMPT_COOLDOWN_SECONDS, 1, 600);
+        String script;
+        if (enabled) {
+            script = "window.__fourmaAutoDismiss=" + autoDismiss + ";\n"
+                    + "window.__fourmaConfig={guardUnlockMs:" + (guardSeconds * 1000L)
+                    + ",rerentMs:" + (rerentSeconds * 1000L)
+                    + ",actionCooldownMs:" + actionCooldown
+                    + ",stepDelayMs:" + stepDelay
+                    + ",flowTimeoutMs:" + flowTimeout
+                    + ",promptCooldownMs:" + (promptSeconds * 1000L) + "};\n"
+                    + EnhancementScript.SOURCE;
+        } else {
+            script = "(function(){if(window.__fourma&&window.__fourma.destroy){"
+                    + "window.__fourma.destroy();delete window.__fourma;}"
+                    + "return '4MA_ENHANCE|disabled';})()";
+        }
+        try {
+            ValueCallback<String> callback = raw -> {
+                if (raw == null) return;
+                if (raw.contains("4MA_ENHANCE|ready")) report("enhancement", "ready");
+                else if (raw.contains("4MA_ENHANCE|already_ready")) {
+                    report("enhancement", "already_ready");
+                } else if (raw.contains("4MA_ENHANCE|skip_shell")) {
+                    report("enhancement", "skip_shell");
+                } else if (raw.contains("4MA_ENHANCE|disabled")) {
+                    report("enhancement", "disabled");
+                }
+            };
+            evaluate.invoke(webView, script, callback);
+        } catch (Throwable error) {
+            report("enhancement_error", error.getClass().getSimpleName());
+        }
+    }
+
+    private int intPref(String key, int fallback, int min, int max) {
+        if (prefs == null) return fallback;
+        int value = prefs.getInt(key, fallback);
+        return Math.max(min, Math.min(max, value));
     }
 
     private void handleXWebProbeResult(String raw) {
