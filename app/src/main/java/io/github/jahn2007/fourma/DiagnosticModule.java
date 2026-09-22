@@ -36,6 +36,7 @@ import java.util.Set;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Enumeration;
+import java.util.Comparator;
 import java.util.regex.Pattern;
 import java.util.function.IntFunction;
 
@@ -354,6 +355,9 @@ public class DiagnosticModule extends XposedModule {
     private void reportNativeApiInvocation(Method method, IntFunction<Object> argumentAt) {
         StringBuilder detail = new StringBuilder(method.getDeclaringClass().getSimpleName())
                 .append('#').append(method.getName());
+        String owner = method.getDeclaringClass().getName().toLowerCase(Locale.ROOT);
+        boolean interesting = owner.contains("network") || owner.contains("request")
+                || owner.contains("http") || owner.contains("socket");
         for (int i = 0; i < method.getParameterTypes().length; i++) {
             Object argument;
             try {
@@ -362,17 +366,50 @@ public class DiagnosticModule extends XposedModule {
                 continue;
             }
             if (argument instanceof JSONObject) {
-                detail.append(" arg").append(i).append("Keys=")
-                        .append(safeJsonKeys((JSONObject) argument));
+                String keys = safeJsonKeys((JSONObject) argument);
+                if (interestingKeys(keys)) interesting = true;
+                detail.append(" arg").append(i).append("Keys=").append(keys);
             } else if (argument instanceof Map) {
-                detail.append(" arg").append(i).append("Keys=")
-                        .append(safeMapKeys((Map<?, ?>) argument));
+                String keys = safeMapKeys((Map<?, ?>) argument);
+                if (interestingKeys(keys)) interesting = true;
+                detail.append(" arg").append(i).append("Keys=").append(keys);
             } else if (argument instanceof String) {
-                String safe = safeNativeString((String) argument);
-                if (!safe.isEmpty()) detail.append(" arg").append(i).append('=').append(safe);
+                String text = ((String) argument).trim();
+                if (text.startsWith("{") && text.endsWith("}") && text.length() <= 100_000) {
+                    try {
+                        String keys = safeJsonKeys(new JSONObject(text));
+                        if (interestingKeys(keys)) interesting = true;
+                        detail.append(" arg").append(i).append("Keys=").append(keys);
+                        continue;
+                    } catch (Throwable ignored) {
+                        // Treat it as an ordinary string below.
+                    }
+                }
+                String safe = safeNativeString(text);
+                if (!safe.isEmpty()) {
+                    interesting = true;
+                    detail.append(" arg").append(i).append('=').append(safe);
+                } else if (interesting) {
+                    detail.append(" arg").append(i).append("Shape=text").append(text.length());
+                }
+            } else if (argument != null && interesting) {
+                String type = argument.getClass().getName();
+                if (type.startsWith("com.tencent.mm") || type.startsWith("com.tencent.wxmm")) {
+                    detail.append(" arg").append(i).append("Type=").append(clean(type, 120));
+                }
             }
         }
-        report("native_api_call", clean(detail.toString(), 500));
+        if (interesting) report("native_api_call", clean(detail.toString(), 500));
+    }
+
+    private boolean interestingKeys(String keys) {
+        if (keys == null || keys.isEmpty()) return false;
+        String lower = keys.toLowerCase(Locale.ROOT);
+        return lower.contains("url") || lower.contains("method") || lower.contains("data")
+                || lower.contains("request") || lower.contains("order")
+                || lower.contains("vehicle") || lower.contains("bike")
+                || lower.contains("lock") || lower.contains("borrow")
+                || lower.contains("return");
     }
 
     private String safeJsonKeys(JSONObject object) {
@@ -407,6 +444,10 @@ public class DiagnosticModule extends XposedModule {
             } catch (Throwable ignored) {
                 return "";
             }
+        }
+        if (text.startsWith("/") && text.length() <= 240
+                && text.matches("/[0-9A-Za-z_./:-]+")) {
+            return text;
         }
         String lower = text.toLowerCase(Locale.ROOT);
         if (lower.matches("[a-z][a-z0-9_.$:/-]{1,80}")
@@ -475,8 +516,11 @@ public class DiagnosticModule extends XposedModule {
         int candidateMethods = 0;
         int installedHooks = 0;
         int reportedCandidates = 0;
-        for (String className : classNames) {
-            if (installedHooks >= 120 || inspectedClasses >= 2500) break;
+        List<String> orderedClasses = new ArrayList<>(classNames);
+        orderedClasses.sort(Comparator.comparingInt(this::dispatcherPriority)
+                .thenComparing(value -> value));
+        for (String className : orderedClasses) {
+            if (installedHooks >= 180 || inspectedClasses >= 2500) break;
             if (!isDiscoveryPackage(className)) continue;
             inspectedClasses++;
             Class<?> type;
@@ -511,7 +555,7 @@ public class DiagnosticModule extends XposedModule {
                 } catch (Throwable ignored) {
                     // Individual methods can be rejected by the runtime; keep scanning.
                 }
-                if (installedHooks >= 120) break;
+                if (installedHooks >= 180) break;
             }
         }
         reportAlways("dispatcher_discovery", "classes=" + classNames.size()
@@ -592,6 +636,16 @@ public class DiagnosticModule extends XposedModule {
         String lower = name.toLowerCase(Locale.ROOT);
         return lower.contains(".jsapi.") || lower.contains(".network")
                 || lower.contains(".service.") || lower.contains(".jsruntime.");
+    }
+
+    private int dispatcherPriority(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.contains(".networking.") || lower.contains(".network.")) return 0;
+        if (lower.contains("request") || lower.contains("http") || lower.contains("socket")) {
+            return 1;
+        }
+        if (lower.contains(".service.") || lower.contains(".jsruntime.")) return 2;
+        return 3;
     }
 
     private boolean isDispatcherCandidate(Method method) {
