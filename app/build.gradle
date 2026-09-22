@@ -10,8 +10,8 @@ android {
         applicationId 'io.github.jahn2007.fourma'
         minSdk 26
         targetSdk 35
-        versionCode 2
-        versionName '0.1.1'
+        versionCode 3
+        versionName '0.1.2'
     }
 
     def signingStore = System.getenv('SIGNING_STORE_FILE')
