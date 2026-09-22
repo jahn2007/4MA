@@ -13,10 +13,12 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.webkit.ValueCallback;
 import android.widget.TextView;
 
 import java.lang.reflect.Field;
@@ -43,6 +45,7 @@ import io.github.libxposed.api.XposedInterface;
  */
 public class DiagnosticModule extends XposedModule {
     private static final String TAG = "4MA";
+    private static final String TARGET_APP_ID = "wx9a6a1a8407b04c5d";
     private static final int MAX_EVENTS = 320;
     private static final int MAX_VIEWS_PER_SCAN = 500;
     private static final Pattern MASKED_VEHICLE = Pattern.compile(
@@ -52,14 +55,30 @@ public class DiagnosticModule extends XposedModule {
             "^gh_[0-9A-Za-z_-]{6,40}(?:@app)?$");
     private static final Pattern ROUTE = Pattern.compile(
             "^(?:pages?|subpackages?|package|components?)/[0-9A-Za-z_./%-]{1,200}$");
+    private static final String XWEB_PROBE_SCRIPT =
+            "(function(){try{"
+                    + "var p=(window.location&&window.location.pathname)||'';"
+                    + "var t=(document.body&&document.body.innerText)||'';"
+                    + "var m=[];"
+                    + "if(t.indexOf('继续用车')>=0)m.push('continue_riding');"
+                    + "if(t.indexOf('开始用车')>=0)m.push('start_riding');"
+                    + "if(t.indexOf('我要还车')>=0||t.indexOf('确认还车')>=0)m.push('return_vehicle');"
+                    + "if(t.indexOf('临时上锁')>=0||t.indexOf('临时锁车')>=0)m.push('temporary_lock');"
+                    + "if(t.indexOf('输入车辆编号')>=0||t.indexOf('输入车编号')>=0)m.push('vehicle_number_input');"
+                    + "if(t.indexOf('车辆所属运营区')>=0)m.push('cross_region_prompt');"
+                    + "return '4MA|'+encodeURIComponent(p)+'|'+m.join(',');"
+                    + "}catch(e){return '4MA||probe_error';}})()";
 
     private final Object reportLock = new Object();
     private final Set<String> seenEvents = Collections.newSetFromMap(new java.util.HashMap<>());
+    private final Set<View> inspectedPageViews = Collections.newSetFromMap(new IdentityHashMap<>());
     private final List<Bundle> pendingReports = new ArrayList<>();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
     private String processName = "unknown";
     private Context targetContext;
+    private volatile boolean targetAppActive;
+    private long lastXwebProbeAt;
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -101,6 +120,8 @@ public class DiagnosticModule extends XposedModule {
             pendingReports.clear();
         }
         targetContext = null;
+        targetAppActive = false;
+        inspectedPageViews.clear();
         return true;
     }
 
@@ -179,7 +200,7 @@ public class DiagnosticModule extends XposedModule {
                     "setText", CharSequence.class, TextView.BufferType.class);
             method.setAccessible(true);
             hook(method).intercept(chain -> {
-                if (captureEnabled()) detectBusinessMarker(chain.getArg(0));
+                if (captureEnabled() && targetAppActive) detectBusinessMarker(chain.getArg(0));
                 return chain.proceed();
             });
         });
@@ -189,7 +210,7 @@ public class DiagnosticModule extends XposedModule {
                     "drawText", String.class, float.class, float.class, Paint.class);
             method.setAccessible(true);
             hook(method).intercept(chain -> {
-                if (captureEnabled()) detectBusinessMarker(chain.getArg(0));
+                if (captureEnabled() && targetAppActive) detectBusinessMarker(chain.getArg(0));
                 return chain.proceed();
             });
         });
@@ -200,7 +221,7 @@ public class DiagnosticModule extends XposedModule {
                     float.class, float.class, Paint.class);
             method.setAccessible(true);
             hook(method).intercept(chain -> {
-                if (captureEnabled()) {
+                if (captureEnabled() && targetAppActive) {
                     Object value = chain.getArg(0);
                     if (value instanceof CharSequence) {
                         int start = (Integer) chain.getArg(1);
@@ -212,6 +233,25 @@ public class DiagnosticModule extends XposedModule {
                     }
                 }
                 return chain.proceed();
+            });
+        });
+
+        tryHook("View.performClick(target rescan)", () -> {
+            Method method = View.class.getDeclaredMethod("performClick");
+            method.setAccessible(true);
+            hook(method).intercept(chain -> {
+                Object result = chain.proceed();
+                if (captureEnabled() && targetAppActive) {
+                    View clicked = (View) chain.getThisObject();
+                    if (clicked != null) {
+                        mainHandler.postDelayed(() -> {
+                            if (captureEnabled() && targetAppActive) {
+                                scanViews(clicked.getRootView());
+                            }
+                        }, 700L);
+                    }
+                }
+                return result;
             });
         });
     }
@@ -234,6 +274,7 @@ public class DiagnosticModule extends XposedModule {
         targetContext = activity.getApplicationContext();
         flushPendingReports();
         report("activity", activity.getClass().getName());
+        targetAppActive = false;
         inspectIntent(activity.getIntent());
         inspectWhitelistedFields(activity, "activity", 2);
         View root = activity.getWindow() == null ? null : activity.getWindow().getDecorView();
@@ -242,6 +283,9 @@ public class DiagnosticModule extends XposedModule {
             mainHandler.postDelayed(() -> {
                 if (captureEnabled()) scanViews(root);
             }, 1_200L);
+            mainHandler.postDelayed(() -> {
+                if (captureEnabled()) scanViews(root);
+            }, 4_000L);
         }
     }
 
@@ -386,6 +430,10 @@ public class DiagnosticModule extends XposedModule {
         if (text.isEmpty() || text.length() > 240) return;
         if (APP_ID.matcher(text).matches()) {
             report(kind, clean(key, 120) + " appId=" + text);
+            if (TARGET_APP_ID.equals(text)) {
+                if (!targetAppActive) reportAlways("target_app", "matched appId=" + text);
+                targetAppActive = true;
+            }
         } else if (USER_NAME.matcher(text).matches()) {
             report(kind, clean(key, 120) + " userName=" + text);
         } else {
@@ -413,6 +461,16 @@ public class DiagnosticModule extends XposedModule {
             if (view instanceof TextView) {
                 detectBusinessMarker(((TextView) view).getText());
             }
+            if (targetAppActive && name.startsWith("com.tencent.mm.plugin.appbrand.page.")) {
+                if (inspectedPageViews.add(view)) {
+                    report("page_runtime", name);
+                    inspectWhitelistedFields(view, "page_view", 4);
+                    reportPageMethodCandidates(view.getClass());
+                }
+            }
+            if (targetAppActive && name.equals("com.tencent.xweb.pinus.PSWebview")) {
+                probeXWeb(view);
+            }
             if (view instanceof ViewGroup) {
                 ViewGroup group = (ViewGroup) view;
                 int childCount = Math.min(group.getChildCount(), MAX_VIEWS_PER_SCAN - count);
@@ -423,6 +481,98 @@ public class DiagnosticModule extends XposedModule {
             }
         }
         report("view_scan", "root=" + root.getClass().getName() + " visited=" + visited.size());
+    }
+
+    private void reportPageMethodCandidates(Class<?> type) {
+        int found = 0;
+        for (Class<?> cursor = type; cursor != null && cursor != Object.class && found < 16;
+             cursor = cursor.getSuperclass()) {
+            Method[] methods;
+            try {
+                methods = cursor.getDeclaredMethods();
+            } catch (Throwable ignored) {
+                continue;
+            }
+            for (Method method : methods) {
+                if (found >= 16) return;
+                if (method.getParameterTypes().length == 0
+                        && method.getReturnType() == String.class
+                        && !containsSensitiveName(method.getName().toLowerCase(Locale.ROOT))) {
+                    found++;
+                    report("page_method_candidate", cursor.getName() + "#" + method.getName());
+                }
+            }
+        }
+    }
+
+    private void probeXWeb(View webView) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastXwebProbeAt < 1_500L) return;
+        lastXwebProbeAt = now;
+
+        Method evaluate = findEvaluateJavascript(webView.getClass());
+        if (evaluate == null) {
+            report("xweb_probe", "evaluateJavascript unavailable class="
+                    + webView.getClass().getName());
+            return;
+        }
+
+        try {
+            evaluate.setAccessible(true);
+            ValueCallback<String> callback = this::handleXWebProbeResult;
+            evaluate.invoke(webView, XWEB_PROBE_SCRIPT, callback);
+            report("xweb_probe", "submitted class=" + webView.getClass().getName());
+        } catch (Throwable error) {
+            report("xweb_probe_error", error.getClass().getSimpleName());
+        }
+    }
+
+    private Method findEvaluateJavascript(Class<?> type) {
+        for (Class<?> cursor = type; cursor != null && cursor != Object.class;
+             cursor = cursor.getSuperclass()) {
+            Method[] methods;
+            try {
+                methods = cursor.getDeclaredMethods();
+            } catch (Throwable ignored) {
+                continue;
+            }
+            for (Method method : methods) {
+                Class<?>[] parameters = method.getParameterTypes();
+                if ("evaluateJavascript".equals(method.getName())
+                        && parameters.length == 2
+                        && parameters[0] == String.class
+                        && parameters[1].isAssignableFrom(ValueCallback.class)) {
+                    return method;
+                }
+            }
+        }
+        return null;
+    }
+
+    private void handleXWebProbeResult(String raw) {
+        if (raw == null) {
+            report("xweb_result", "null");
+            return;
+        }
+        String value = raw.replace("\\u002F", "/").replace("\\/", "/");
+        int prefix = value.indexOf("4MA|");
+        if (prefix < 0) {
+            report("xweb_result", "unexpected_result");
+            return;
+        }
+        String[] parts = value.substring(prefix).split("\\|", 3);
+        if (parts.length >= 2) {
+            String path = Uri.decode(parts[1]);
+            while (path.startsWith("/")) path = path.substring(1);
+            if (ROUTE.matcher(path).matches()) report("xweb_route", path);
+            else if (!path.isEmpty()) report("xweb_route", "non_page_path");
+        }
+        if (parts.length >= 3) {
+            String markers = parts[2].replace("\\\"", "").replace("\"", "");
+            for (String marker : markers.split(",")) {
+                if (marker.matches("[a-z_]{3,40}")) report("xweb_marker", marker);
+            }
+        }
     }
 
     private boolean isInterestingViewClass(String name) {
