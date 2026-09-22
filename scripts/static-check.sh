@@ -10,11 +10,14 @@ test "$(cat app/src/main/resources/META-INF/xposed/scope.list)" = "com.tencent.m
 
 grep -qx 'minApiVersion=102' app/src/main/resources/META-INF/xposed/module.prop
 grep -qx 'targetApiVersion=102' app/src/main/resources/META-INF/xposed/module.prop
+grep -qx 'autoHotReload=true' app/src/main/resources/META-INF/xposed/module.prop
 grep -q "compileOnly 'io.github.libxposed:api:102.0.0'" app/build.gradle
 grep -q "implementation 'io.github.libxposed:service:102.0.0'" app/build.gradle
 grep -q 'de.robv.android.xposed.category.MODULE_SETTINGS' app/src/main/AndroidManifest.xml
 grep -q 'android:name=".LauncherAlias"' app/src/main/AndroidManifest.xml
 grep -q 'android:name=".ReportProvider"' app/src/main/AndroidManifest.xml
+grep -q 'boolean onHotReloading' app/src/main/java/io/github/jahn2007/fourma/DiagnosticModule.java
+grep -q 'void onHotReloaded' app/src/main/java/io/github/jahn2007/fourma/DiagnosticModule.java
 
 if grep -n 'prefs\.edit' app/src/main/java/io/github/jahn2007/fourma/DiagnosticModule.java; then
   echo 'Hooked processes must not write libxposed RemotePreferences.' >&2

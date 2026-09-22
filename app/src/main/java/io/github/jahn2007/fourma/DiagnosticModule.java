@@ -32,6 +32,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedInterface;
 
 /**
  * Read-only first-stage probe for the WeChat Mini Program runtime.
@@ -55,6 +56,7 @@ public class DiagnosticModule extends XposedModule {
     private final Object reportLock = new Object();
     private final Set<String> seenEvents = Collections.newSetFromMap(new java.util.HashMap<>());
     private final List<Bundle> pendingReports = new ArrayList<>();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
     private String processName = "unknown";
     private Context targetContext;
@@ -88,6 +90,44 @@ public class DiagnosticModule extends XposedModule {
         reportAlways("scope", "appbrand process ready classLoader="
                 + className(param.getClassLoader()));
         installHooks();
+    }
+
+    @Override
+    public boolean onHotReloading(HotReloadingParam param) {
+        // Remove every delayed callback that captures this module generation. Hook invocations
+        // already in flight are allowed to finish against their existing chain snapshot.
+        mainHandler.removeCallbacksAndMessages(null);
+        synchronized (reportLock) {
+            pendingReports.clear();
+        }
+        targetContext = null;
+        return true;
+    }
+
+    @Override
+    public void onHotReloaded(HotReloadedParam param) {
+        for (XposedInterface.HookHandle handle : param.getOldHookHandles()) {
+            try {
+                handle.unhook();
+            } catch (Throwable error) {
+                log(Log.ERROR, TAG, "Unable to remove an old hook during reload", error);
+            }
+        }
+
+        processName = clean(param.getProcessName(), 96);
+        prefs = getRemotePreferences(Prefs.GROUP);
+        targetContext = resolveCurrentApplication();
+        reportAlways("hot_reload", "new generation loaded; oldHooks="
+                + param.getOldHookHandles().size());
+        flushPendingReports();
+
+        if ("com.tencent.mm".equals(processName)) {
+            installMainProcessSignalHook();
+        } else if (processName.startsWith("com.tencent.mm:appbrand")) {
+            installHooks();
+        } else {
+            detach();
+        }
     }
 
     private void installMainProcessSignalHook() {
@@ -199,7 +239,7 @@ public class DiagnosticModule extends XposedModule {
         View root = activity.getWindow() == null ? null : activity.getWindow().getDecorView();
         if (root != null) {
             scanViews(root);
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            mainHandler.postDelayed(() -> {
                 if (captureEnabled()) scanViews(root);
             }, 1_200L);
         }
@@ -208,7 +248,7 @@ public class DiagnosticModule extends XposedModule {
     private void inspectDialogSoon(Dialog dialog) {
         if (dialog == null) return;
         report("dialog", dialog.getClass().getName());
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+        mainHandler.postDelayed(() -> {
             try {
                 Window window = dialog.getWindow();
                 if (captureEnabled() && window != null) scanViews(window.getDecorView());
@@ -216,6 +256,20 @@ public class DiagnosticModule extends XposedModule {
                 report("inspect_error", "dialog " + error.getClass().getSimpleName());
             }
         }, 250L);
+    }
+
+    private Context resolveCurrentApplication() {
+        try {
+            Class<?> activityThread = Class.forName("android.app.ActivityThread");
+            Object application = activityThread.getDeclaredMethod("currentApplication")
+                    .invoke(null);
+            if (application instanceof Context) {
+                return ((Context) application).getApplicationContext();
+            }
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "Unable to resolve current Application during hot reload", error);
+        }
+        return null;
     }
 
     private void inspectIntent(Intent intent) {
