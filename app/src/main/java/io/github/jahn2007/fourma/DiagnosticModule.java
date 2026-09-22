@@ -6,6 +6,8 @@ import android.app.Instrumentation;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -44,6 +46,11 @@ public class DiagnosticModule extends XposedModule {
     private static final int MAX_VIEWS_PER_SCAN = 500;
     private static final Pattern MASKED_VEHICLE = Pattern.compile(
             ".*[0-9]{2,}[\\s-]*[*＊•·]+[\\s-]*[0-9]{1,}.*");
+    private static final Pattern APP_ID = Pattern.compile("^wx[0-9A-Za-z_-]{8,40}$");
+    private static final Pattern USER_NAME = Pattern.compile(
+            "^gh_[0-9A-Za-z_-]{6,40}(?:@app)?$");
+    private static final Pattern ROUTE = Pattern.compile(
+            "^(?:pages?|subpackages?|package|components?)/[0-9A-Za-z_./%-]{1,200}$");
 
     private final Object reportLock = new Object();
     private final Set<String> seenEvents = Collections.newSetFromMap(new java.util.HashMap<>());
@@ -136,6 +143,37 @@ public class DiagnosticModule extends XposedModule {
                 return chain.proceed();
             });
         });
+
+        tryHook("Canvas.drawText(String)", () -> {
+            Method method = Canvas.class.getDeclaredMethod(
+                    "drawText", String.class, float.class, float.class, Paint.class);
+            method.setAccessible(true);
+            hook(method).intercept(chain -> {
+                if (captureEnabled()) detectBusinessMarker(chain.getArg(0));
+                return chain.proceed();
+            });
+        });
+
+        tryHook("Canvas.drawText(CharSequence)", () -> {
+            Method method = Canvas.class.getDeclaredMethod(
+                    "drawText", CharSequence.class, int.class, int.class,
+                    float.class, float.class, Paint.class);
+            method.setAccessible(true);
+            hook(method).intercept(chain -> {
+                if (captureEnabled()) {
+                    Object value = chain.getArg(0);
+                    if (value instanceof CharSequence) {
+                        int start = (Integer) chain.getArg(1);
+                        int end = (Integer) chain.getArg(2);
+                        CharSequence sequence = (CharSequence) value;
+                        if (start >= 0 && end >= start && end <= sequence.length()) {
+                            detectBusinessMarker(sequence.subSequence(start, end));
+                        }
+                    }
+                }
+                return chain.proceed();
+            });
+        });
     }
 
     private interface HookInstall {
@@ -190,19 +228,19 @@ public class DiagnosticModule extends XposedModule {
             return;
         }
         if (extras == null) return;
-        String[] keys = {
-                "appId", "appid", "app_id", "username", "route", "path",
-                "pagePath", "page_path", "currentPage", "current_page"
-        };
-        for (String key : keys) {
-            if (!extras.containsKey(key)) continue;
+        for (String key : extras.keySet()) {
+            if (key == null || containsSensitiveName(key.toLowerCase(Locale.ROOT))) continue;
             Object value;
             try {
                 value = extras.get(key);
             } catch (Throwable ignored) {
                 continue;
             }
-            reportSafeValue("intent", key, value);
+            report("intent_key", clean(key, 140) + " type=" + className(value));
+            reportIdentifierCandidate("intent", key, value);
+            if (value != null && isRelevantRuntimeClass(value.getClass().getName())) {
+                inspectWhitelistedFields(value, "intent." + clean(key, 80), 3);
+            }
         }
     }
 
@@ -220,6 +258,7 @@ public class DiagnosticModule extends XposedModule {
         Class<?> type = object.getClass();
         String owner = type.getName();
         if (depth > 0 && !isRelevantRuntimeClass(owner)) return;
+        if (isRelevantRuntimeClass(owner)) report("runtime_class", owner);
 
         int inspected = 0;
         for (Class<?> cursor = type; cursor != null && cursor != Object.class && inspected < 80;
@@ -234,16 +273,17 @@ public class DiagnosticModule extends XposedModule {
                 if (++inspected > 80 || Modifier.isStatic(field.getModifiers())) break;
                 String name = field.getName();
                 String normalized = name.toLowerCase(Locale.ROOT);
+                if (containsSensitiveName(normalized)) continue;
                 boolean valueField = isWhitelistedField(normalized);
-                boolean childField = depth < maxDepth
-                        && isRelevantRuntimeClass(field.getType().getName());
-                if (!valueField && !childField) continue;
                 try {
                     field.setAccessible(true);
                     Object value = field.get(object);
-                    if (valueField) {
+                    if (valueField && (value instanceof Number || value instanceof Boolean)) {
                         reportSafeValue("runtime_field", source + "." + name, value);
-                    } else {
+                    }
+                    reportIdentifierCandidate("runtime_field", source + "." + name, value);
+                    if (depth < maxDepth && value != null
+                            && isRelevantRuntimeClass(value.getClass().getName())) {
                         inspectWhitelistedFields(value, source + "." + name,
                                 depth + 1, maxDepth, visited);
                     }
@@ -283,6 +323,23 @@ public class DiagnosticModule extends XposedModule {
             if (!text.isEmpty()) report(kind, clean(key, 100) + "=" + text);
         } else if (value instanceof Number || value instanceof Boolean) {
             report(kind, clean(key, 100) + "=" + value);
+        }
+    }
+
+    private void reportIdentifierCandidate(String kind, String key, Object value) {
+        if (!(value instanceof CharSequence)) return;
+        String text = value.toString().trim();
+        if (text.isEmpty() || text.length() > 240) return;
+        if (APP_ID.matcher(text).matches()) {
+            report(kind, clean(key, 120) + " appId=" + text);
+        } else if (USER_NAME.matcher(text).matches()) {
+            report(kind, clean(key, 120) + " userName=" + text);
+        } else {
+            int query = text.indexOf('?');
+            String path = query >= 0 ? text.substring(0, query) : text;
+            if (ROUTE.matcher(path).matches()) {
+                report(kind, clean(key, 120) + " route=" + clean(path, 220));
+            }
         }
     }
 
