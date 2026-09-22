@@ -84,6 +84,7 @@ public class DiagnosticModule extends XposedModule {
     private String processName = "unknown";
     private Context targetContext;
     private volatile boolean targetAppActive;
+    private volatile boolean hotReloadRecordPending;
     private long lastXwebProbeAt;
 
     @Override
@@ -144,7 +145,8 @@ public class DiagnosticModule extends XposedModule {
         processName = clean(param.getProcessName(), 96);
         prefs = getRemotePreferences(Prefs.GROUP);
         targetContext = resolveCurrentApplication();
-        recordHotReloadState();
+        hotReloadRecordPending = true;
+        tryRecordPendingHotReload();
         flushPendingReports();
 
         if ("com.tencent.mm".equals(processName)) {
@@ -166,6 +168,7 @@ public class DiagnosticModule extends XposedModule {
                 Activity activity = (Activity) chain.getArg(0);
                 if (activity != null) {
                     targetContext = activity.getApplicationContext();
+                    tryRecordPendingHotReload();
                     flushPendingReports();
                     reportAlways("main_activity", activity.getClass().getName());
                 }
@@ -283,6 +286,7 @@ public class DiagnosticModule extends XposedModule {
 
     private void inspectActivitySoon(Activity activity) {
         targetContext = activity.getApplicationContext();
+        tryRecordPendingHotReload();
         flushPendingReports();
         report("activity", activity.getClass().getName());
         targetAppActive = false;
@@ -750,15 +754,19 @@ public class DiagnosticModule extends XposedModule {
         }
     }
 
-    private void recordHotReloadState() {
+    private void tryRecordPendingHotReload() {
+        if (!hotReloadRecordPending) return;
         Context context = targetContext;
         if (context == null) return;
         try {
             Bundle payload = new Bundle();
             payload.putString(ReportProvider.EXTRA_REPORT_KEY, Prefs.reportKey(processName));
-            context.getContentResolver().call(
+            Bundle result = context.getContentResolver().call(
                     Uri.parse("content://" + ReportProvider.AUTHORITY),
                     ReportProvider.METHOD_RECORD_HOT_RELOAD, null, payload);
+            if (result != null && result.getBoolean("accepted", false)) {
+                hotReloadRecordPending = false;
+            }
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "Unable to persist hot reload time", error);
         }
