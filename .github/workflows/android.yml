@@ -25,9 +25,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android platform
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
 
@@ -77,4 +74,3 @@ jobs:
             dist/SHA256SUMS.txt
           generate_release_notes: true
           prerelease: true
-
