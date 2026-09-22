@@ -66,8 +66,14 @@ public class DiagnosticModule extends XposedModule {
                     + "if(t.indexOf('临时上锁')>=0||t.indexOf('临时锁车')>=0)m.push('temporary_lock');"
                     + "if(t.indexOf('输入车辆编号')>=0||t.indexOf('输入车编号')>=0)m.push('vehicle_number_input');"
                     + "if(t.indexOf('车辆所属运营区')>=0)m.push('cross_region_prompt');"
-                    + "return '4MA|'+encodeURIComponent(p)+'|'+m.join(',');"
-                    + "}catch(e){return '4MA||probe_error';}})()";
+                    + "var wt=typeof window.wx;"
+                    + "var bt=typeof window.WeixinJSBridge;"
+                    + "var ct=typeof window.__wxConfig;"
+                    + "var bc=document.body?document.body.children.length:0;"
+                    + "var nc=document.getElementsByTagName('*').length;"
+                    + "return '4MA2|'+encodeURIComponent(p)+'|'+m.join(',')+'|'"
+                    + "+wt+','+bt+','+ct+','+t.length+','+bc+','+nc;"
+                    + "}catch(e){return '4MA2||probe_error|error';}})()";
 
     private final Object reportLock = new Object();
     private final Set<String> seenEvents = Collections.newSetFromMap(new java.util.HashMap<>());
@@ -200,7 +206,11 @@ public class DiagnosticModule extends XposedModule {
                     "setText", CharSequence.class, TextView.BufferType.class);
             method.setAccessible(true);
             hook(method).intercept(chain -> {
-                if (captureEnabled() && targetAppActive) detectBusinessMarker(chain.getArg(0));
+                if (captureEnabled() && targetAppActive) {
+                    Canvas canvas = (Canvas) chain.getThisObject();
+                    detectCanvasMarker(chain.getArg(0), (Float) chain.getArg(1),
+                            (Float) chain.getArg(2), canvas);
+                }
                 return chain.proceed();
             });
         });
@@ -228,7 +238,9 @@ public class DiagnosticModule extends XposedModule {
                         int end = (Integer) chain.getArg(2);
                         CharSequence sequence = (CharSequence) value;
                         if (start >= 0 && end >= start && end <= sequence.length()) {
-                            detectBusinessMarker(sequence.subSequence(start, end));
+                            Canvas canvas = (Canvas) chain.getThisObject();
+                            detectCanvasMarker(sequence.subSequence(start, end),
+                                    (Float) chain.getArg(3), (Float) chain.getArg(4), canvas);
                         }
                     }
                 }
@@ -356,7 +368,9 @@ public class DiagnosticModule extends XposedModule {
         Class<?> type = object.getClass();
         String owner = type.getName();
         if (depth > 0 && !isRelevantRuntimeClass(owner)) return;
-        if (isRelevantRuntimeClass(owner)) report("runtime_class", owner);
+        if (isRelevantRuntimeClass(owner) && verboseEnabled() && depth <= 1) {
+            report("runtime_class", owner);
+        }
 
         int inspected = 0;
         for (Class<?> cursor = type; cursor != null && cursor != Object.class && inspected < 80;
@@ -462,6 +476,7 @@ public class DiagnosticModule extends XposedModule {
                 detectBusinessMarker(((TextView) view).getText());
             }
             if (targetAppActive && name.startsWith("com.tencent.mm.plugin.appbrand.page.")) {
+                probePageRoute(view);
                 if (inspectedPageViews.add(view)) {
                     report("page_runtime", name);
                     inspectWhitelistedFields(view, "page_view", 4);
@@ -501,6 +516,37 @@ public class DiagnosticModule extends XposedModule {
                     found++;
                     report("page_method_candidate", cursor.getName() + "#" + method.getName());
                 }
+            }
+        }
+    }
+
+    private void probePageRoute(Object pageObject) {
+        for (Class<?> cursor = pageObject.getClass(); cursor != null && cursor != Object.class;
+             cursor = cursor.getSuperclass()) {
+            Method[] methods;
+            try {
+                methods = cursor.getDeclaredMethods();
+            } catch (Throwable ignored) {
+                continue;
+            }
+            for (Method method : methods) {
+                if (!"getCurrentUrl".equals(method.getName())
+                        || method.getParameterTypes().length != 0
+                        || method.getReturnType() != String.class) continue;
+                try {
+                    method.setAccessible(true);
+                    Object result = method.invoke(pageObject);
+                    if (result instanceof String) {
+                        String text = ((String) result).trim();
+                        int query = text.indexOf('?');
+                        String path = query >= 0 ? text.substring(0, query) : text;
+                        while (path.startsWith("/")) path = path.substring(1);
+                        if (ROUTE.matcher(path).matches()) report("page_route", path);
+                    }
+                } catch (Throwable error) {
+                    report("page_route_error", error.getClass().getSimpleName());
+                }
+                return;
             }
         }
     }
@@ -555,12 +601,12 @@ public class DiagnosticModule extends XposedModule {
             return;
         }
         String value = raw.replace("\\u002F", "/").replace("\\/", "/");
-        int prefix = value.indexOf("4MA|");
+        int prefix = value.indexOf("4MA2|");
         if (prefix < 0) {
             report("xweb_result", "unexpected_result");
             return;
         }
-        String[] parts = value.substring(prefix).split("\\|", 3);
+        String[] parts = value.substring(prefix).split("\\|", 4);
         if (parts.length >= 2) {
             String path = Uri.decode(parts[1]);
             while (path.startsWith("/")) path = path.substring(1);
@@ -571,6 +617,14 @@ public class DiagnosticModule extends XposedModule {
             String markers = parts[2].replace("\\\"", "").replace("\"", "");
             for (String marker : markers.split(",")) {
                 if (marker.matches("[a-z_]{3,40}")) report("xweb_marker", marker);
+            }
+        }
+        if (parts.length >= 4) {
+            String capabilities = parts[3].replace("\\\"", "").replace("\"", "");
+            if (capabilities.matches("[a-z]+,[a-z]+,[a-z]+,[0-9]+,[0-9]+,[0-9]+")) {
+                report("xweb_capabilities", capabilities);
+            } else if ("error".equals(capabilities)) {
+                report("xweb_capabilities", "probe_error");
             }
         }
     }
@@ -602,6 +656,34 @@ public class DiagnosticModule extends XposedModule {
         if (MASKED_VEHICLE.matcher(text).matches()) {
             report("ui_marker", "masked_vehicle_number shape=" + maskShape(text));
         }
+    }
+
+    private void detectCanvasMarker(Object value, float x, float y, Canvas canvas) {
+        detectBusinessMarker(value);
+        if (!(value instanceof CharSequence)) return;
+        String marker = classifyBusinessMarker(value.toString().trim());
+        if (marker == null) return;
+        int width = canvas == null ? -1 : canvas.getWidth();
+        int height = canvas == null ? -1 : canvas.getHeight();
+        report("ui_geometry", marker + " x=" + Math.round(x) + " y=" + Math.round(y)
+                + " canvas=" + width + "x" + height);
+    }
+
+    private String classifyBusinessMarker(String text) {
+        if (text.contains("继续用车")) return "continue_riding";
+        if (text.contains("开始用车")) return "start_riding";
+        if (text.contains("我要还车") || text.contains("确认还车") || "还车".equals(text)) {
+            return "return_vehicle";
+        }
+        if (text.contains("临时上锁") || text.contains("临时锁车") || "锁车".equals(text)) {
+            return "temporary_lock";
+        }
+        if (text.contains("再次开锁")) return "unlock_again";
+        if (text.contains("输入车辆编号") || text.contains("输入车编号")) {
+            return "vehicle_number_input";
+        }
+        if (text.contains("车辆所属运营区")) return "cross_region_prompt";
+        return null;
     }
 
     private void marker(String text, String needle, String marker) {
