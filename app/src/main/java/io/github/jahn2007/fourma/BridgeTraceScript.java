@@ -27,13 +27,36 @@ final class BridgeTraceScript {
                   }
                 }
 
+                function valueShape(value) {
+                  if (typeof value === 'number') return 'number';
+                  if (typeof value === 'boolean') return 'boolean';
+                  if (typeof value !== 'string') return Array.isArray(value) ? 'array' : typeof value;
+                  if (/^\\d{6,12}$/.test(value)) return 'digits' + value.length;
+                  if (/\\d.*[*＊•·]|[*＊•·].*\\d/.test(value)) return 'masked' + value.length;
+                  return 'text' + Math.min(value.length, 99);
+                }
+
+                function nestedShape(argument) {
+                  if (!argument || typeof argument !== 'object') return '';
+                  const candidates = ['markers', 'covers', 'data'];
+                  for (const key of candidates) {
+                    let item = argument[key];
+                    if (Array.isArray(item)) item = item[0];
+                    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+                    return Object.keys(item).filter(name => !sensitive.test(name)).slice(0, 24)
+                        .sort().map(name => name + ':' + valueShape(item[name])).join(',');
+                  }
+                  return '';
+                }
+
                 function push(kind, name, argument) {
                   const event = {
                     kind: String(kind || '').slice(0, 32),
                     name: String(name || '').replace(/[^0-9A-Za-z_.$:/-]/g, '').slice(0, 120),
                     path: safePath(argument && argument.url),
                     keys: safeKeys(argument),
-                    dataKeys: safeKeys(argument && argument.data)
+                    dataKeys: safeKeys(argument && argument.data),
+                    nested: nestedShape(argument)
                   };
                   const last = trace.events[trace.events.length - 1];
                   const fingerprint = JSON.stringify(event);

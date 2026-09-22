@@ -31,7 +31,9 @@ import java.util.Locale;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.Map;
 import java.util.regex.Pattern;
+import java.util.function.IntFunction;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -86,6 +88,7 @@ public class DiagnosticModule extends XposedModule {
     private SharedPreferences prefs;
     private String processName = "unknown";
     private Context targetContext;
+    private ClassLoader targetClassLoader;
     private volatile boolean targetAppActive;
     private volatile boolean hotReloadRecordPending;
     private long lastXwebProbeAt;
@@ -118,7 +121,8 @@ public class DiagnosticModule extends XposedModule {
 
         reportAlways("scope", "appbrand process ready classLoader="
                 + className(param.getClassLoader()));
-        installHooks();
+        targetClassLoader = param.getClassLoader();
+        installHooks(targetClassLoader);
     }
 
     @Override
@@ -148,6 +152,7 @@ public class DiagnosticModule extends XposedModule {
         processName = clean(param.getProcessName(), 96);
         prefs = getRemotePreferences(Prefs.GROUP);
         targetContext = resolveCurrentApplication();
+        targetClassLoader = targetContext == null ? null : targetContext.getClassLoader();
         hotReloadRecordPending = true;
         tryRecordPendingHotReload();
         flushPendingReports();
@@ -155,7 +160,7 @@ public class DiagnosticModule extends XposedModule {
         if ("com.tencent.mm".equals(processName)) {
             installMainProcessSignalHook();
         } else if (processName.startsWith("com.tencent.mm:appbrand")) {
-            installHooks();
+            installHooks(targetClassLoader);
         } else {
             detach();
         }
@@ -180,7 +185,8 @@ public class DiagnosticModule extends XposedModule {
         });
     }
 
-    private void installHooks() {
+    private void installHooks(ClassLoader classLoader) {
+        installNativeJsApiHooks(classLoader);
         tryHook("Instrumentation.callActivityOnResume", () -> {
             Method method = Instrumentation.class.getDeclaredMethod(
                     "callActivityOnResume", Activity.class);
@@ -271,6 +277,138 @@ public class DiagnosticModule extends XposedModule {
                 return result;
             });
         });
+    }
+
+    private void installNativeJsApiHooks(ClassLoader classLoader) {
+        if (classLoader == null) {
+            reportAlways("native_api_hook", "classLoader unavailable");
+            return;
+        }
+        String[] candidates = {
+                "com.tencent.mm.plugin.appbrand.jsapi.c0",
+                "com.tencent.mm.plugin.appbrand.jsapi.f0",
+                "com.tencent.mm.plugin.appbrand.service.e6"
+        };
+        for (String className : candidates) {
+            try {
+                Class<?> type = Class.forName(className, false, classLoader);
+                int installed = 0;
+                for (Method method : type.getDeclaredMethods()) {
+                    if (!isNativeApiCandidate(method)) continue;
+                    report("native_api_method", describeMethod(method));
+                    if (Modifier.isAbstract(method.getModifiers())
+                            || Modifier.isNative(method.getModifiers())) continue;
+                    method.setAccessible(true);
+                    hook(method).intercept(chain -> {
+                        if (captureEnabled() && targetAppActive) {
+                            reportNativeApiInvocation(method, chain::getArg);
+                        }
+                        return chain.proceed();
+                    });
+                    installed++;
+                }
+                reportAlways("native_api_hook", className + " installed=" + installed);
+            } catch (Throwable error) {
+                reportAlways("native_api_hook", className + " error="
+                        + error.getClass().getSimpleName());
+            }
+        }
+    }
+
+    private boolean isNativeApiCandidate(Method method) {
+        if (method.getParameterTypes().length == 0 || method.getParameterTypes().length > 8) {
+            return false;
+        }
+        for (Class<?> parameter : method.getParameterTypes()) {
+            String name = parameter.getName();
+            if (parameter == String.class || JSONObject.class.isAssignableFrom(parameter)
+                    || JSONArray.class.isAssignableFrom(parameter)
+                    || Map.class.isAssignableFrom(parameter)
+                    || name.contains("appbrand.jsapi") || name.contains("appbrand.service")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String describeMethod(Method method) {
+        StringBuilder out = new StringBuilder(method.getDeclaringClass().getName())
+                .append('#').append(method.getName()).append('(');
+        Class<?>[] parameters = method.getParameterTypes();
+        for (int i = 0; i < parameters.length; i++) {
+            if (i > 0) out.append(',');
+            out.append(parameters[i].getName());
+        }
+        return clean(out.append(')').append(':').append(method.getReturnType().getName()).toString(),
+                480);
+    }
+
+    private void reportNativeApiInvocation(Method method, IntFunction<Object> argumentAt) {
+        StringBuilder detail = new StringBuilder(method.getDeclaringClass().getSimpleName())
+                .append('#').append(method.getName());
+        for (int i = 0; i < method.getParameterTypes().length; i++) {
+            Object argument;
+            try {
+                argument = argumentAt.apply(i);
+            } catch (Throwable ignored) {
+                continue;
+            }
+            if (argument instanceof JSONObject) {
+                detail.append(" arg").append(i).append("Keys=")
+                        .append(safeJsonKeys((JSONObject) argument));
+            } else if (argument instanceof Map) {
+                detail.append(" arg").append(i).append("Keys=")
+                        .append(safeMapKeys((Map<?, ?>) argument));
+            } else if (argument instanceof String) {
+                String safe = safeNativeString((String) argument);
+                if (!safe.isEmpty()) detail.append(" arg").append(i).append('=').append(safe);
+            }
+        }
+        report("native_api_call", clean(detail.toString(), 500));
+    }
+
+    private String safeJsonKeys(JSONObject object) {
+        List<String> keys = new ArrayList<>();
+        java.util.Iterator<String> iterator = object.keys();
+        while (iterator.hasNext() && keys.size() < 30) {
+            String key = iterator.next();
+            if (!containsSensitiveName(key.toLowerCase(Locale.ROOT))) keys.add(safeTraceToken(key, 64));
+        }
+        Collections.sort(keys);
+        return android.text.TextUtils.join(",", keys);
+    }
+
+    private String safeMapKeys(Map<?, ?> map) {
+        List<String> keys = new ArrayList<>();
+        for (Object value : map.keySet()) {
+            String key = String.valueOf(value);
+            if (!containsSensitiveName(key.toLowerCase(Locale.ROOT))) keys.add(safeTraceToken(key, 64));
+            if (keys.size() >= 30) break;
+        }
+        Collections.sort(keys);
+        return android.text.TextUtils.join(",", keys);
+    }
+
+    private String safeNativeString(String value) {
+        if (value == null) return "";
+        String text = value.trim();
+        if (text.startsWith("http://") || text.startsWith("https://")) {
+            try {
+                Uri uri = Uri.parse(text);
+                return clean(uri.getHost() + uri.getPath(), 220);
+            } catch (Throwable ignored) {
+                return "";
+            }
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (lower.matches("[a-z][a-z0-9_.$:/-]{1,80}")
+                && (lower.contains("request") || lower.contains("borrow")
+                || lower.contains("unlock") || lower.contains("lock")
+                || lower.contains("return") || lower.contains("order")
+                || lower.contains("bike") || lower.contains("vehicle"))) {
+            return text;
+        }
+        return "";
     }
 
     private interface HookInstall {
@@ -694,10 +832,12 @@ public class DiagnosticModule extends XposedModule {
                 String path = safeTracePath(event.optString("path"));
                 String keys = safeTraceKeys(event.optJSONArray("keys"));
                 String dataKeys = safeTraceKeys(event.optJSONArray("dataKeys"));
+                String nested = safeNestedShape(event.optString("nested"));
                 report("bridge_call", "kind=" + kind + " name=" + name
                         + (path.isEmpty() ? "" : " path=" + path)
                         + (keys.isEmpty() ? "" : " keys=" + keys)
-                        + (dataKeys.isEmpty() ? "" : " dataKeys=" + dataKeys));
+                        + (dataKeys.isEmpty() ? "" : " dataKeys=" + dataKeys)
+                        + (nested.isEmpty() ? "" : " nested=" + nested));
             }
         } catch (Throwable error) {
             report("bridge_trace_error", "parse_" + error.getClass().getSimpleName());
@@ -726,6 +866,12 @@ public class DiagnosticModule extends XposedModule {
             out.append(key);
         }
         return out.toString();
+    }
+
+    private String safeNestedShape(String value) {
+        if (value == null || value.length() > 500) return "";
+        if (!value.matches("[0-9A-Za-z_.,:-]*")) return "";
+        return value;
     }
 
     private int intPref(String key, int fallback, int min, int max) {
