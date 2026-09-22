@@ -73,7 +73,8 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         verboseSwitch = addSwitch(root, "记录视图类名", "增加报告信息量，仍不记录普通文本内容");
         hideIconSwitch = addSwitch(root, "隐藏桌面图标", "隐藏后从 LSPosed 模块详情中的“模块设置”进入");
 
-        statusView = text("正在连接 LSPosed 服务…", 13, Typeface.MONOSPACE);
+        statusView = text("正在连接 LSPosed 服务…", 13, Typeface.NORMAL);
+        statusView.setTypeface(Typeface.MONOSPACE);
         statusView.setTextIsSelectable(true);
         statusView.setPadding(dp(14), dp(14), dp(14), dp(14));
         statusView.setBackgroundColor(cardColor());
