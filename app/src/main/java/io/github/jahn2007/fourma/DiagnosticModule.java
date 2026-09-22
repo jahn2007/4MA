@@ -32,6 +32,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.Map;
+import java.util.HashSet;
+import java.util.Enumeration;
 import java.util.regex.Pattern;
 import java.util.function.IntFunction;
 
@@ -91,6 +93,7 @@ public class DiagnosticModule extends XposedModule {
     private ClassLoader targetClassLoader;
     private volatile boolean targetAppActive;
     private volatile boolean hotReloadRecordPending;
+    private volatile boolean nativeDiscoveryStarted;
     private long lastXwebProbeAt;
 
     @Override
@@ -135,6 +138,7 @@ public class DiagnosticModule extends XposedModule {
         }
         targetContext = null;
         targetAppActive = false;
+        nativeDiscoveryStarted = false;
         inspectedPageViews.clear();
         return true;
     }
@@ -153,6 +157,7 @@ public class DiagnosticModule extends XposedModule {
         prefs = getRemotePreferences(Prefs.GROUP);
         targetContext = resolveCurrentApplication();
         targetClassLoader = targetContext == null ? null : targetContext.getClassLoader();
+        nativeDiscoveryStarted = false;
         hotReloadRecordPending = true;
         tryRecordPendingHotReload();
         flushPendingReports();
@@ -186,7 +191,6 @@ public class DiagnosticModule extends XposedModule {
     }
 
     private void installHooks(ClassLoader classLoader) {
-        installNativeJsApiHooks(classLoader);
         tryHook("Instrumentation.callActivityOnResume", () -> {
             Method method = Instrumentation.class.getDeclaredMethod(
                     "callActivityOnResume", Activity.class);
@@ -432,6 +436,7 @@ public class DiagnosticModule extends XposedModule {
         report("activity", activity.getClass().getName());
         targetAppActive = false;
         inspectIntent(activity.getIntent());
+        if (targetAppActive) startNativeApiDiscovery();
         inspectWhitelistedFields(activity, "activity", 2);
         View root = activity.getWindow() == null ? null : activity.getWindow().getDecorView();
         if (root != null) {
@@ -449,6 +454,138 @@ public class DiagnosticModule extends XposedModule {
                 }, delay);
             }
         }
+    }
+
+    private void startNativeApiDiscovery() {
+        if (nativeDiscoveryStarted || targetClassLoader == null) return;
+        nativeDiscoveryStarted = true;
+        Thread worker = new Thread(this::discoverNativeApiHooks, "4MA-jsapi-discovery");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void discoverNativeApiHooks() {
+        Set<String> classNames = enumerateAppBrandClasses(targetClassLoader);
+        int inspectedClasses = 0;
+        int candidateMethods = 0;
+        int installedHooks = 0;
+        int reportedCandidates = 0;
+        for (String className : classNames) {
+            if (installedHooks >= 120 || inspectedClasses >= 2500) break;
+            if (!isDiscoveryPackage(className)) continue;
+            inspectedClasses++;
+            Class<?> type;
+            try {
+                type = Class.forName(className, false, targetClassLoader);
+            } catch (Throwable ignored) {
+                continue;
+            }
+            Method[] methods;
+            try {
+                methods = type.getDeclaredMethods();
+            } catch (Throwable ignored) {
+                continue;
+            }
+            for (Method method : methods) {
+                if (!isDispatcherCandidate(method)) continue;
+                candidateMethods++;
+                if (reportedCandidates++ < 30) {
+                    report("dispatcher_candidate", describeMethod(method));
+                }
+                if (Modifier.isAbstract(method.getModifiers())
+                        || Modifier.isNative(method.getModifiers())) continue;
+                try {
+                    method.setAccessible(true);
+                    hook(method).intercept(chain -> {
+                        if (captureEnabled() && targetAppActive) {
+                            reportNativeApiInvocation(method, chain::getArg);
+                        }
+                        return chain.proceed();
+                    });
+                    installedHooks++;
+                } catch (Throwable ignored) {
+                    // Individual methods can be rejected by the runtime; keep scanning.
+                }
+                if (installedHooks >= 120) break;
+            }
+        }
+        reportAlways("dispatcher_discovery", "classes=" + classNames.size()
+                + " inspected=" + inspectedClasses + " candidates=" + candidateMethods
+                + " installed=" + installedHooks);
+    }
+
+    private Set<String> enumerateAppBrandClasses(ClassLoader loader) {
+        Set<String> result = new HashSet<>();
+        Set<Object> seenDexFiles = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (ClassLoader cursor = loader; cursor != null; cursor = cursor.getParent()) {
+            try {
+                Field pathListField = findField(cursor.getClass(), "pathList");
+                if (pathListField == null) continue;
+                pathListField.setAccessible(true);
+                Object pathList = pathListField.get(cursor);
+                if (pathList == null) continue;
+                Field elementsField = findField(pathList.getClass(), "dexElements");
+                if (elementsField == null) continue;
+                elementsField.setAccessible(true);
+                Object value = elementsField.get(pathList);
+                if (!(value instanceof Object[])) continue;
+                for (Object element : (Object[]) value) {
+                    if (element == null) continue;
+                    Field dexField = findField(element.getClass(), "dexFile");
+                    if (dexField == null) continue;
+                    dexField.setAccessible(true);
+                    Object dexFile = dexField.get(element);
+                    if (dexFile == null || !seenDexFiles.add(dexFile)) continue;
+                    Method entries = dexFile.getClass().getDeclaredMethod("entries");
+                    entries.setAccessible(true);
+                    Object enumerated = entries.invoke(dexFile);
+                    if (!(enumerated instanceof Enumeration)) continue;
+                    Enumeration<?> names = (Enumeration<?>) enumerated;
+                    while (names.hasMoreElements()) {
+                        String name = String.valueOf(names.nextElement());
+                        if (name.startsWith("com.tencent.mm.plugin.appbrand.")) result.add(name);
+                    }
+                }
+            } catch (Throwable error) {
+                report("dispatcher_discovery_error", error.getClass().getSimpleName());
+            }
+        }
+        return result;
+    }
+
+    private Field findField(Class<?> type, String name) {
+        for (Class<?> cursor = type; cursor != null && cursor != Object.class;
+             cursor = cursor.getSuperclass()) {
+            try {
+                return cursor.getDeclaredField(name);
+            } catch (NoSuchFieldException ignored) {
+                // Continue with the superclass.
+            }
+        }
+        return null;
+    }
+
+    private boolean isDiscoveryPackage(String name) {
+        String lower = name.toLowerCase(Locale.ROOT);
+        return lower.contains(".jsapi.") || lower.contains(".network")
+                || lower.contains(".service.") || lower.contains(".jsruntime.");
+    }
+
+    private boolean isDispatcherCandidate(Method method) {
+        Class<?>[] parameters = method.getParameterTypes();
+        if (parameters.length < 2 || parameters.length > 8) return false;
+        int strings = 0;
+        boolean structured = false;
+        boolean numericId = false;
+        for (Class<?> parameter : parameters) {
+            if (parameter == String.class || CharSequence.class.isAssignableFrom(parameter)) strings++;
+            if (JSONObject.class.isAssignableFrom(parameter)
+                    || JSONArray.class.isAssignableFrom(parameter)
+                    || Map.class.isAssignableFrom(parameter)) structured = true;
+            if (parameter == int.class || parameter == Integer.class
+                    || parameter == long.class || parameter == Long.class) numericId = true;
+        }
+        return strings >= 1 && (structured || strings >= 2 || numericId);
     }
 
     private void inspectDialogSoon(Dialog dialog) {
