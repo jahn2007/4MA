@@ -14,6 +14,7 @@ import android.os.Process;
 public class ReportProvider extends ContentProvider {
     public static final String AUTHORITY = "io.github.jahn2007.fourma.reports";
     public static final String METHOD_APPEND = "append";
+    public static final String METHOD_RECORD_HOT_RELOAD = "record_hot_reload";
     public static final String EXTRA_REPORT_KEY = "report_key";
     public static final String EXTRA_LINE = "line";
     private static final int MAX_REPORT_CHARS = 28_000;
@@ -26,12 +27,26 @@ public class ReportProvider extends ContentProvider {
 
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
-        if (!METHOD_APPEND.equals(method) || extras == null || !callerIsAllowed()) {
+        if (extras == null || !callerIsAllowed()) {
             return Bundle.EMPTY;
         }
         String key = extras.getString(EXTRA_REPORT_KEY, "");
+        if (!Prefs.LOG_KEYS.contains(key)) return Bundle.EMPTY;
+        if (METHOD_RECORD_HOT_RELOAD.equals(method)) {
+            synchronized (writeLock) {
+                getContext().getSharedPreferences(Prefs.REPORT_STORE,
+                                android.content.Context.MODE_PRIVATE)
+                        .edit()
+                        .putLong(Prefs.hotReloadKey(key), System.currentTimeMillis())
+                        .apply();
+            }
+            Bundle result = new Bundle();
+            result.putBoolean("accepted", true);
+            return result;
+        }
+        if (!METHOD_APPEND.equals(method)) return Bundle.EMPTY;
         String line = extras.getString(EXTRA_LINE, "");
-        if (!Prefs.LOG_KEYS.contains(key) || line.isEmpty() || line.length() > 800
+        if (line.isEmpty() || line.length() > 800
                 || line.indexOf('\r') >= 0 || !line.endsWith("\n")
                 || line.substring(0, line.length() - 1).indexOf('\n') >= 0) {
             return Bundle.EMPTY;

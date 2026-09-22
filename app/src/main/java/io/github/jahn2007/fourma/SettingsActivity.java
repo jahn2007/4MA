@@ -170,6 +170,9 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         }
         long updated = reportPrefs.getLong(Prefs.KEY_LAST_UPDATE, 0L);
         String updatedText = updated == 0L ? "尚无" : DateFormat.getDateTimeInstance().format(new Date(updated));
+        long hotReloaded = latestHotReloadTime();
+        String hotReloadedText = hotReloaded == 0L ? "尚无"
+                : DateFormat.getDateTimeInstance().format(new Date(hotReloaded));
         String framework = service == null ? "未连接"
                 : service.getFrameworkName() + " API " + service.getApiVersion();
         String capture = remotePrefs == null ? "未知"
@@ -178,6 +181,7 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
                 + "\n采集：" + capture
                 + "\n已有报告：" + reports + " 个进程，约 " + chars + " 字符"
                 + "\n进程槽：" + (processes.length() == 0 ? "无" : processes)
+                + "\n最近热重载：" + hotReloadedText
                 + "\n最后更新：" + updatedText);
     }
 
@@ -185,7 +189,15 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
         StringBuilder out = new StringBuilder();
         out.append("4MA diagnostic report\n");
         out.append("moduleVersion=").append(versionName()).append('\n');
-        out.append("exportedAt=").append(System.currentTimeMillis()).append("\n\n");
+        out.append("exportedAt=").append(System.currentTimeMillis()).append('\n');
+        for (String key : Prefs.LOG_KEYS) {
+            long timestamp = reportPrefs.getLong(Prefs.hotReloadKey(key), 0L);
+            if (timestamp > 0L) {
+                out.append("lastHotReload.").append(key.substring("report_".length()))
+                        .append('=').append(timestamp).append('\n');
+            }
+        }
+        out.append('\n');
         if (remotePrefs == null) out.append("LSPosed service is not connected.\n\n");
         for (String key : Prefs.LOG_KEYS) {
             String value = reportPrefs.getString(key, "");
@@ -208,7 +220,7 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
     private void confirmClear() {
         new AlertDialog.Builder(this)
                 .setTitle("清空诊断报告")
-                .setMessage("删除模块保存的所有进程报告？")
+                .setMessage("删除模块保存的所有进程报告？最近热重载时间会保留。")
                 .setPositiveButton("清空", (dialog, which) -> {
                     SharedPreferences.Editor editor = reportPrefs.edit();
                     for (String key : Prefs.LOG_KEYS) editor.remove(key);
@@ -218,6 +230,14 @@ public class SettingsActivity extends Activity implements XposedServiceHelper.On
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private long latestHotReloadTime() {
+        long latest = 0L;
+        for (String key : Prefs.LOG_KEYS) {
+            latest = Math.max(latest, reportPrefs.getLong(Prefs.hotReloadKey(key), 0L));
+        }
+        return latest;
     }
 
     private boolean isLauncherVisible() {

@@ -144,8 +144,7 @@ public class DiagnosticModule extends XposedModule {
         processName = clean(param.getProcessName(), 96);
         prefs = getRemotePreferences(Prefs.GROUP);
         targetContext = resolveCurrentApplication();
-        reportAlways("hot_reload", "new generation loaded; oldHooks="
-                + param.getOldHookHandles().size());
+        recordHotReloadState();
         flushPendingReports();
 
         if ("com.tencent.mm".equals(processName)) {
@@ -748,6 +747,20 @@ public class DiagnosticModule extends XposedModule {
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "Report IPC failed", error);
             return false;
+        }
+    }
+
+    private void recordHotReloadState() {
+        Context context = targetContext;
+        if (context == null) return;
+        try {
+            Bundle payload = new Bundle();
+            payload.putString(ReportProvider.EXTRA_REPORT_KEY, Prefs.reportKey(processName));
+            context.getContentResolver().call(
+                    Uri.parse("content://" + ReportProvider.AUTHORITY),
+                    ReportProvider.METHOD_RECORD_HOT_RELOAD, null, payload);
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "Unable to persist hot reload time", error);
         }
     }
 

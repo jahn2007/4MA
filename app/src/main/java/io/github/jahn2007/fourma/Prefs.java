@@ -10,6 +10,7 @@ public final class Prefs {
     public static final String KEY_DEBUG_VERBOSE = "debug_verbose";
     public static final String KEY_HIDE_ICON = "hide_icon";
     public static final String KEY_LAST_UPDATE = "last_update";
+    public static final String KEY_HOT_RELOAD_PREFIX = "hot_reload_";
 
     public static final List<String> LOG_KEYS = Arrays.asList(
             "report_main",
@@ -33,5 +34,9 @@ public final class Prefs {
             return "report_appbrand_other";
         }
         return "report_appbrand_other";
+    }
+
+    public static String hotReloadKey(String reportKey) {
+        return KEY_HOT_RELOAD_PREFIX + reportKey;
     }
 }
