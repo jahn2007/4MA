@@ -4,14 +4,14 @@ plugins {
 
 android {
     namespace 'io.github.jahn2007.fourma'
-    compileSdk 37
+    compileSdk 36
 
     defaultConfig {
         applicationId 'io.github.jahn2007.fourma'
         minSdk 26
         targetSdk 35
-        versionCode 5
-        versionName '0.1.4'
+        versionCode 6
+        versionName '0.1.5'
     }
 
     def signingStore = System.getenv('SIGNING_STORE_FILE')

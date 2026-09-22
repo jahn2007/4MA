@@ -1,6 +1,6 @@
 # 4MA
 
-4MA 是面向微信 **7MA 出行**小程序的 libxposed API 102 模块。当前 `0.1.4`
+4MA 是面向微信 **7MA 出行**小程序的 libxposed API 102 模块。当前 `0.1.5`
 是只读诊断版，用来确认小程序所在进程、AppID、页面路由、宿主 Activity、视图类型和
 少量业务界面标记，为后续稳定实现体验增强功能提供实机证据。
 
@@ -51,11 +51,14 @@ Token、Cookie、请求头、手机号或普通界面文本。完整车辆编号
 - Android Gradle Plugin 9.2.1
 - Gradle 9.5.1
 - Java 17
-- compileSdk 37 / targetSdk 35
+- compileSdk 36 / targetSdk 35
 - `io.github.libxposed:api:102.0.0`
 - `io.github.libxposed:service:102.0.0`
 
 本仓库不提交 Gradle Wrapper 二进制文件；GitHub Actions 使用 `setup-gradle` 提供固定版本。
+libxposed service 102 的 AAR 元数据声明 `minCompileSdk=37`，但 API 37 仍是预览平台；工程使用
+AGP 的 `android.experimental.disableCompileSdkChecks=true` 在稳定 API 36 上编译。该设置会放宽
+所有依赖的 AAR 元数据检查，实际 API 不兼容仍会在 Java 编译或运行时暴露。
 
 ## 下一阶段
 
